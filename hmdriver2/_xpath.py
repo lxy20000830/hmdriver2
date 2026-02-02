@@ -32,6 +32,7 @@ class _XPath:
             logger.debug(f"{xpath} Bounds: {bounds}")
             _xe = _XMLElement(bounds, self._d)
             setattr(_xe, "attrib_info", node.attrib)
+            setattr(_xe, "_xml_node", node)
             return _xe
 
         return _XMLElement(None, self._d)
@@ -63,6 +64,8 @@ class _XMLElement:
     def __init__(self, bounds: Bounds, d: Driver):
         self.bounds = bounds
         self._d = d
+        self.attrib_info = {}
+        self._xml_node = None
 
     def _verify(self):
         if not self.bounds:
@@ -75,6 +78,40 @@ class _XMLElement:
 
     def exists(self) -> bool:
         return self.bounds is not None
+
+    def get_text(self) -> str:
+        """
+        显式获取文本的方法，优先级：
+        1. 从attrib_info的text字段获取
+        2. 从XML节点的text()方法获取（兼容部分特殊节点）
+        3. 返回空字符串
+        """
+        if not self.exists():
+            logger.warning("元素不存在，无法获取文本")
+            return ""
+
+        # 优先从属性中获取文本
+        text = self.attrib_info.get("text", "").strip()
+        if text:
+            return text
+
+        # 备用：从XML节点直接获取文本（兼容特殊场景）
+        if self._xml_node is not None:
+            try:
+                node_text = self._xml_node.text or ""
+                return node_text.strip()
+            except Exception as e:
+                logger.warning(f"从XML节点获取文本失败: {e}")
+
+        return ""
+
+    @property
+    @delay
+    def text(self) -> str:
+        """
+        简化的text属性，直接调用get_text()，和UiObject的text属性用法保持一致
+        """
+        return self.get_text()
 
     @delay
     def click(self):
