@@ -5,14 +5,34 @@ import uuid
 import re
 from typing import Type, Any, Tuple, Dict, Union, List, Optional
 from functools import cached_property  # python3.8+
-
+import os
 from . import logger
 from .utils import delay
 from ._client import HmClient
 from ._uiobject import UiObject
 from .hdc import list_devices
-from .exception import DeviceNotFoundError
+from .exception import DeviceNotFoundError, ElementNotFoundError, HdcError
 from .proto import HypiumResponse, KeyCode, Point, DisplayRotation, DeviceInfo, CommandResult
+from dataclasses import dataclass
+import cv2
+import numpy as np
+
+
+
+@dataclass
+class Rect:
+    left: int
+    right: int
+    top: int
+    bottom: int
+
+    @property
+    def width(self):
+        return self.right - self.left
+
+    @property
+    def height(self):
+        return self.bottom - self.top
 
 
 class Driver:
@@ -487,4 +507,87 @@ class Driver:
         """
         from ._xpath import _XPath
         return _XPath(self)
+
+    def capture_screen(self, save_path: str, in_pc: bool = True,
+                       area: Union[Rect, None] = None) -> str:
+        """
+        @func 直接在PC端生成截图（绕开设备端文件拉取），支持全屏/指定Rect区域截图
+        @param save_path: 截图保存路径
+        @param in_pc: 保存到PC端（True，固定为True，绕开设备端逻辑）
+        @param area: 指定区域截图（仅支持Rect/None）
+        @return: 截图保存路径
+        """
+        # 1. 参数校验
+        if not save_path:
+            raise ValueError("保存路径save_path不能为空")
+        # 强制in_pc=True，避免设备端交互（根源解决拉取失败）
+        in_pc = True
+
+        # 2. 生成PC端全屏临时截图路径
+        pc_full_snap = os.path.abspath(f"./hmdriver_full_snap_{uuid.uuid4()}.jpeg")
+
+        try:
+            # 3. 直接生成PC端全屏截图（核心：绕开设备端文件）
+            # 调用已封装的screenshot方法，直接保存到PC，无需设备端中转
+            self.screenshot(pc_full_snap, method="snapshot_display")
+            if not os.path.exists(pc_full_snap):
+                # 降级：尝试screenCap方法（若snapshot_display失败）
+                logger.warning("snapshot_display生成PC截图失败，尝试screenCap")
+                # 若self.screenshot不支持screenCap，直接调用hdc screenCap并拉取（最后尝试）
+                device_temp = f"/data/local/tmp/last_try_snap_{uuid.uuid4()}.jpeg"
+                self.hdc.shell(f"screenCap -f {device_temp}")
+                # 最后一次尝试拉取（若仍失败则抛明确错误）
+                try:
+                    self.pull_file(device_temp, pc_full_snap)
+                    self.hdc.shell(f"rm -f {device_temp}")
+                except Exception as e:
+                    raise RuntimeError(
+                        f"所有截图方式均失败！\n"
+                        f"1. self.screenshot直接生成PC截图失败\n"
+                        f"2. screenCap+拉取失败：{str(e)}\n"
+                        f"请检查：\n"
+                        f"- HDC连接是否正常（hdc devices）\n"
+                        f"- 设备是否解锁/开发者模式已开启\n"
+                        f"- 设备是否授予HDC文件访问权限"
+                    )
+
+            # 4. 处理截图区域：全屏/裁剪（仅保留Rect逻辑）
+            capture_rect = area  # 直接使用传入的Rect，无需解析控件
+            if capture_rect is not None and not isinstance(capture_rect, Rect):
+                raise TypeError(f"area仅支持Rect/None类型，当前传入类型：{type(capture_rect)}")
+
+            # 5. 生成最终截图（全屏/裁剪）
+            if capture_rect is None:
+                # 全屏截图：直接重命名
+                if os.path.exists(save_path):
+                    os.remove(save_path)
+                os.rename(pc_full_snap, save_path)
+            else:
+                # 指定Rect区域裁剪
+                full_img = cv2.imread(pc_full_snap)
+                if full_img is None:
+                    raise RuntimeError(f"读取全屏截图{pc_full_snap}失败，文件损坏或格式不支持")
+                # 校验裁剪区域
+                img_h, img_w = full_img.shape[:2]
+                if (capture_rect.left < 0 or capture_rect.top < 0 or
+                        capture_rect.right > img_w or capture_rect.bottom > img_h):
+                    raise RuntimeError(
+                        f"裁剪区域越界！图片尺寸({img_w}x{img_h})，裁剪区域({capture_rect.left},{capture_rect.top})-({capture_rect.right},{capture_rect.bottom})"
+                    )
+                # 裁剪并保存
+                crop_img = full_img[capture_rect.top:capture_rect.bottom, capture_rect.left:capture_rect.right]
+                cv2.imwrite(save_path, crop_img)
+                # 删除全屏临时文件
+                os.remove(pc_full_snap)
+
+            logger.info(f"截图成功保存到PC端：{save_path}")
+            return save_path
+
+        except Exception as e:
+            logger.error(f"截图失败：{str(e)}")
+            # 清理临时文件
+            if os.path.exists(pc_full_snap):
+                os.remove(pc_full_snap)
+            raise
+    
 
