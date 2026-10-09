@@ -102,13 +102,15 @@ class HdcWrapper:
         return pattern.findall(result.output)
 
     def send_file(self, lpath: str, rpath: str):
-        result = _execute_command(f"{self.hdc_prefix} -t {self.serial} file send {lpath} {rpath}")
+        # Ensure the path is properly quoted (paths may contain spaces)
+        result = _execute_command(f'{self.hdc_prefix} -t {self.serial} file send "{lpath}" "{rpath}"')
         if result.exit_code != 0:
             raise HdcError("HDC send file error", result.error)
         return result
 
     def recv_file(self, rpath: str, lpath: str):
-        result = _execute_command(f"{self.hdc_prefix} -t {self.serial} file recv {rpath} {lpath}")
+        # Ensure the path is properly quoted (paths may contain spaces)
+        result = _execute_command(f'{self.hdc_prefix} -t {self.serial} file recv "{rpath}" "{lpath}"')
         if result.exit_code != 0:
             raise HdcError("HDC receive file error", result.error)
         return result
