@@ -47,6 +47,9 @@
   - 控件点击，长按，拖拽，缩放
   - 文本输入，清除
   - 获取控件树
+- 支持图片操作
+  - 图找图（模板匹配定位，点击，存在判断）
+  - 图片相似度对比（SSIM/直方图/MSE，UI回归校验）
 - 支持Toast获取
 - UI Inspector
 - [TODO] 全场景弹窗处理
@@ -174,6 +177,10 @@ unset HDC_SERVER_PORT
       - [xpath控件双击](#xpath控件双击)
       - [xpath控件长按](#xpath控件长按)
       - [xpath控件输入](#xpath控件输入)
+  - [模糊定位](#模糊定位)
+  - [图片对比](#图片对比)
+    - [图找图](#图找图)
+    - [两图对比](#两图对比)
   - [获取控件树](#获取控件树)
   - [获取Toast](#获取toast)
 
@@ -567,7 +574,9 @@ d(type="Button", index=0)
 ```
 Notes：当同一界面有多个属性相同的元素时，`index`属性非常实用
 
-**模糊定位TODO**
+**模糊定位**
+
+支持 `text`、`description`、`id`、`key`、`type` 五个属性的模糊匹配，详见 [模糊定位](#模糊定位) 章节
 
 **组合定位**
 
@@ -757,6 +766,105 @@ d.xpath('//*[@text="showDialog"]').long_click()
 ```python
 d.xpath('//*[@text="showDialog"]').input_text("adb")
 ```
+
+## 模糊定位
+
+除了精确匹配外，`text`、`description`、`id`、`key`、`type` 五个属性均支持模糊匹配，API 命名与 uiautomator2 保持一致
+
+| 模糊方式 | 后缀 | 示例 |
+| --- | --- | --- |
+| 包含匹配 | `Contains` | `d(textContains="精选")` |
+| 前缀匹配 | `StartsWith` | `d(textStartsWith="精")` |
+| 后缀匹配 | `EndsWith` | `d(textEndsWith="推荐")` |
+| 正则匹配 | `Matches` | `d(textMatches=r"^精.*区$")` |
+
+```python
+# 包含匹配
+d(textContains="精选").click()
+
+# 正则匹配（re.search 语义）
+d(textMatches=r"^精选.*").exists()
+
+# id/key/type/description 同样支持
+d(idContains="btn_").click()
+d(typeStartsWith="But").count
+d(descriptionContains="关闭").exists()
+d(keyMatches=r"^btn_\d+$").exists()
+
+# 模糊条件可以和精确条件组合使用
+d(textContains="精选", type="Text", clickable=True).click()
+
+# 多个匹配结果时，用 index 选中第 N 个（控件树先序）
+d(textContains="精选", index=1).click()
+```
+
+Notes：
+- 模糊匹配在 PC 端基于 `dump_hierarchy` 控件树完成，**不依赖设备端 hypium 版本**，各固件行为一致
+- 相比精确匹配（走 uitest 协议），模糊匹配需要先拉取整棵控件树，速度稍慢，优先使用精确匹配
+- 模糊匹配的元素支持：属性获取（`text`/`bounds`/`info`等）、`click`/`double_click`/`long_click`/`input_text`/`click_if_exists`/`exists`/`count`
+- 模糊匹配的元素暂不支持：`clear_text`、`pinch_in/pinch_out`、`drag_to`，以及与 `isBefore/isAfter` 相对定位组合
+
+## 图片对比
+
+图片能力统一通过 `d.image` 访问，依赖 `opencv-python`（`numpy` + `opencv-python-headless`，已作为默认依赖声明）
+
+```bash
+pip3 install -U hmdriver2
+```
+
+### 图找图
+
+在当前屏幕截图中查找目标图片（模板匹配），返回匹配位置和相似度
+
+```python
+result = d.image.find("btn.png", threshold=0.8)
+# 找到返回 MatchResult，未找到返回 None
+# result.similarity  -> 0.98  匹配相似度
+# result.rect        -> Bounds(left=100, top=200, right=130, bottom=240)
+# result.center      -> Point(x=115, y=220)
+
+# 在指定区域内查找，region 为 (left, top, right, bottom) 或 Rect 对象
+d.image.find("btn.png", region=(100, 200, 500, 600))
+
+# 判断图片是否在当前屏幕上
+d.image.exists("btn.png")
+
+# 点击图片中心，未找到时抛出 ImageNotFoundError
+d.image.click("btn.png")
+
+# 图片存在才点击，否则跳过（不抛错）
+d.image.click_if_exists("btn.png")
+
+# 查找所有匹配位置（自动去除重叠结果，按相似度降序）
+results = d.image.find_all("icon.png", threshold=0.8, max_results=5)
+```
+
+参数说明：
+- `threshold`：相似度阈值，范围 [0, 1]，默认 0.8，值越高匹配越严格
+- `grayscale`：默认 `True`，灰度匹配，抗色彩噪点更稳定
+- `region`：搜索区域，元组 `(left, top, right, bottom)` 或 `Rect` 对象，默认全屏
+
+### 两图对比
+
+比较两张本地图片的相似度，返回 0~1 的分数（1 表示完全一致），常用于 UI 截图回归校验
+
+```python
+# method: "ssim"(默认) | "histogram" | "mse"
+score = d.image.compare("a.png", "b.png")
+score = d.image.compare("a.png", "b.png", method="histogram")
+score = d.image.compare("a.png", "b.png", method="mse")
+
+# 断言两张图足够相似，相似度低于阈值时抛出 ImageCompareError
+d.image.assert_same("a.png", "b.png", threshold=0.9)
+```
+
+算法说明：
+- `ssim`：结构相似性，对局部结构/像素变化敏感，适合逐像素的 UI 回归（默认）
+- `histogram`：直方图相关性，只关注色彩分布，对元素位置移动不敏感
+- `mse`：归一化均方误差，像素级差异
+
+Notes：
+- 两图尺寸不一致时，会自动将第二张图缩放到与第一张相同的尺寸再比较
 
 ## 获取控件树
 ```python

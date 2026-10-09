@@ -38,3 +38,11 @@ class InjectGestureError(Exception):
 
 class ScreenRecordError(Exception):
     pass
+
+
+class ImageNotFoundError(Exception):
+    pass
+
+
+class ImageCompareError(Exception):
+    pass

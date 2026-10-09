@@ -1,14 +1,18 @@
 # -*- coding: utf-8 -*-
 
 import enum
+import re
 import time
-from typing import List, Union
+from typing import List, Union, TYPE_CHECKING
 
 from . import logger
-from .utils import delay
+from .utils import delay, parse_bounds
 from ._client import HmClient
 from .exception import ElementNotFoundError
-from .proto import ComponentData, ByData, HypiumResponse, Point, Bounds, ElementInfo
+from .proto import ComponentData, ByData, HypiumResponse, Point, Bounds, ElementInfo, NodeData
+
+if TYPE_CHECKING:
+    from .driver import Driver
 
 
 class ByType(enum.Enum):
@@ -28,16 +32,63 @@ class ByType(enum.Enum):
     isBefore = "isBefore"
     isAfter = "isAfter"
 
+    # fuzzy matching (implemented client-side via dump_hierarchy)
+    textContains = "textContains"
+    textStartsWith = "textStartsWith"
+    textEndsWith = "textEndsWith"
+    textMatches = "textMatches"
+    descriptionContains = "descriptionContains"
+    descriptionStartsWith = "descriptionStartsWith"
+    descriptionEndsWith = "descriptionEndsWith"
+    descriptionMatches = "descriptionMatches"
+    idContains = "idContains"
+    idStartsWith = "idStartsWith"
+    idEndsWith = "idEndsWith"
+    idMatches = "idMatches"
+    keyContains = "keyContains"
+    keyStartsWith = "keyStartsWith"
+    keyEndsWith = "keyEndsWith"
+    keyMatches = "keyMatches"
+    typeContains = "typeContains"
+    typeStartsWith = "typeStartsWith"
+    typeEndsWith = "typeEndsWith"
+    typeMatches = "typeMatches"
+
     @classmethod
     def verify(cls, value):
         return any(value == item.value for item in cls)
 
 
+# all fuzzy matching keys, handled by client-side hierarchy dump
+FUZZY_KEYS = frozenset({
+    "textContains", "textStartsWith", "textEndsWith", "textMatches",
+    "descriptionContains", "descriptionStartsWith", "descriptionEndsWith", "descriptionMatches",
+    "idContains", "idStartsWith", "idEndsWith", "idMatches",
+    "keyContains", "keyStartsWith", "keyEndsWith", "keyMatches",
+    "typeContains", "typeStartsWith", "typeEndsWith", "typeMatches",
+})
+
+# boolean attributes in hierarchy dump (values are "true"/"false"/"" strings)
+_BOOL_ATTRS = frozenset({
+    "clickable", "longClickable", "scrollable", "enabled",
+    "focused", "selected", "checked", "checkable",
+})
+
+_FUZZY_SUFFIXES = ("Contains", "StartsWith", "EndsWith", "Matches")
+
+
+def _norm_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() == "true"
+
+
 class UiObject:
     DEFAULT_TIMEOUT = 2
 
-    def __init__(self, client: HmClient, **kwargs) -> None:
+    def __init__(self, client: HmClient, driver: "Driver" = None, **kwargs) -> None:
         self._client = client
+        self._driver = driver
         self._raw_kwargs = kwargs
 
         self._index = kwargs.pop("index", 0)
@@ -47,15 +98,21 @@ class UiObject:
         self._kwargs = kwargs
         self.__verify()
 
-        self._component: Union[ComponentData, None] = None  # cache
+        self._component: Union[ComponentData, NodeData, None] = None  # cache
 
     def __str__(self) -> str:
-        return f"UiObject [{self._raw_kwargs}"
+        return f"UiObject [{self._raw_kwargs}]"
 
     def __verify(self):
         for k, v in self._kwargs.items():
             if not ByType.verify(k):
                 raise ReferenceError(f"{k} is not allowed.")
+
+        if (self._isBefore or self._isAfter) and self.__is_client_match():
+            raise ValueError("isBefore/isAfter is not supported with fuzzy matching keys")
+
+    def __is_client_match(self) -> bool:
+        return any(k in FUZZY_KEYS for k in self._kwargs)
 
     @property
     def count(self) -> int:
@@ -69,10 +126,10 @@ class UiObject:
         obj = self.find_component(retries, wait_time)
         return True if obj else False
 
-    def __set_component(self, component: ComponentData):
+    def __set_component(self, component: Union[ComponentData, NodeData]):
         self._component = component
 
-    def find_component(self, retries: int = 1, wait_time=1) -> ComponentData:
+    def find_component(self, retries: int = 1, wait_time=1) -> Union[ComponentData, NodeData]:
         for attempt in range(retries):
             components = self.__find_components()
             if components and self._index < len(components):
@@ -93,7 +150,10 @@ class UiObject:
             return None
         return ComponentData(resp.result)
 
-    def __find_components(self) -> Union[List[ComponentData], None]:
+    def __find_components(self) -> Union[List[ComponentData], List[NodeData], None]:
+        if self.__is_client_match():
+            return self.__find_components_client_side()
+
         by: ByData = self.__get_by()
         resp: HypiumResponse = self._client.invoke("Driver.findComponents", args=[by.value])
         if not resp.result:
@@ -104,6 +164,60 @@ class UiObject:
 
         return components
 
+    # ------------------------------------------------------------------
+    # client-side fuzzy matching (dump_hierarchy based)
+    # ------------------------------------------------------------------
+    def __find_components_client_side(self) -> List[NodeData]:
+        if not self._driver:
+            raise RuntimeError("fuzzy matching requires a Driver instance, please use d(...) instead")
+
+        hierarchy = self._driver.dump_hierarchy()
+        if not hierarchy:
+            return None
+
+        results: List[NodeData] = []
+        self.__walk_hierarchy(hierarchy, results)
+        return results
+
+    def __walk_hierarchy(self, node: dict, results: List[NodeData]):
+        attrs = node.get("attributes", {})
+        if attrs and self.__match_attributes(attrs):
+            bounds = parse_bounds(attrs.get("bounds", ""))
+            if bounds:
+                results.append(NodeData(attrs, bounds))
+        for child in node.get("children", []):
+            self.__walk_hierarchy(child, results)
+
+    def __match_attributes(self, attrs: dict) -> bool:
+        for k, v in self._kwargs.items():
+            if not self.__match_one(k, v, attrs):
+                return False
+        return True
+
+    @staticmethod
+    def __match_one(key: str, value, attrs: dict) -> bool:
+        for suffix in _FUZZY_SUFFIXES:
+            if key.endswith(suffix):
+                attr = key[: -len(suffix)]
+                raw = str(attrs.get(attr, ""))
+                value = str(value)
+                if suffix == "Contains":
+                    return value in raw
+                if suffix == "StartsWith":
+                    return raw.startswith(value)
+                if suffix == "EndsWith":
+                    return raw.endswith(value)
+                # Matches
+                return re.search(value, raw) is not None
+
+        raw = attrs.get(key, "")
+        if key in _BOOL_ATTRS:
+            return _norm_bool(raw) == bool(value)
+        return str(raw) == str(value)
+
+    # ------------------------------------------------------------------
+    # protocol based matching (unchanged)
+    # ------------------------------------------------------------------
     def __get_by(self) -> ByData:
         for k, v in self._kwargs.items():
             api = f"On.{k}"
@@ -120,12 +234,66 @@ class UiObject:
         return ByData(resp.result)
 
     def __operate(self, api, args=[], retries: int = 2):
+        if self.__is_client_match():
+            return self.__client_operate(api, args, retries)
+
         if not self._component:
             if not self.find_component(retries):
                 raise ElementNotFoundError(f"Element({self}) not found after {retries} retries")
 
         resp: HypiumResponse = self._client.invoke(api, this=self._component.value, args=args)
         return resp.result
+
+    # ------------------------------------------------------------------
+    # client-side matched element operations
+    # ------------------------------------------------------------------
+    def __client_operate(self, api, args=[], retries: int = 2):
+        if not self._component:
+            if not self.find_component(retries):
+                raise ElementNotFoundError(f"Element({self}) not found after {retries} retries")
+
+        node: NodeData = self._component
+        attrs = node.attributes
+        name = api.split(".", 1)[-1]  # "Component.click" -> "click"
+
+        if name == "getId":
+            return attrs.get("id", "")
+        if name == "getKey":
+            return attrs.get("key", "")
+        if name == "getType":
+            return attrs.get("type", "")
+        if name == "getText":
+            return attrs.get("text", "")
+        if name == "getDescription":
+            return attrs.get("description", "")
+        if name in ("isSelected", "isChecked", "isEnabled", "isFocused",
+                    "isCheckable", "isClickable", "isLongClickable", "isScrollable"):
+            return _norm_bool(attrs.get(name[2:].lower(), ""))
+        if name == "getBounds":
+            return {"bottom": node.bounds.bottom, "left": node.bounds.left,
+                    "right": node.bounds.right, "top": node.bounds.top}
+        if name == "getBoundsCenter":
+            center: Point = node.bounds.get_center()
+            return {"x": center.x, "y": center.y}
+        if name == "click":
+            self._driver.click(*node.bounds.get_center().to_tuple())
+            return None
+        if name == "doubleClick":
+            self._driver.double_click(*node.bounds.get_center().to_tuple())
+            return None
+        if name == "longClick":
+            self._driver.long_click(*node.bounds.get_center().to_tuple())
+            return None
+        if name == "inputText":
+            # click to focus the input field, then type
+            self._driver.click(*node.bounds.get_center().to_tuple())
+            self._driver.input_text(args[0])
+            return None
+        if name in ("clearText", "pinchIn", "pinchOut", "dragTo"):
+            raise NotImplementedError(
+                f"`{api}` is not supported for fuzzy matched elements, use exact matching instead")
+
+        raise RuntimeError(f"unknown api for client-side matched element: {api}")
 
     @property
     def id(self) -> str:

@@ -89,7 +89,7 @@ class Driver:
 
     def __call__(self, **kwargs) -> UiObject:
 
-        return UiObject(self._client, **kwargs)
+        return UiObject(self._client, self, **kwargs)
 
     def __del__(self):
         Driver._instance.clear()
@@ -507,6 +507,16 @@ class Driver:
         """
         from ._xpath import _XPath
         return _XPath(self)
+
+    @cached_property
+    def image(self):
+        """
+        Image matching & comparison.
+        d.image.find("btn.png")        # template matching on current screen
+        d.image.compare("a.png", "b.png")  # compare two local images
+        """
+        from ._image import _Image
+        return _Image(self)
 
     def capture_screen(self, save_path: str, in_pc: bool = True,
                        area: Union[Rect, None] = None) -> str:

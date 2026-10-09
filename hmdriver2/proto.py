@@ -138,6 +138,29 @@ class ElementInfo:
         return asdict(self)
 
 
+@dataclass
+class NodeData:
+    """
+    A matched UI node from the client-side hierarchy dump.
+    Used by fuzzy matching (textContains/textMatches/...).
+    """
+    attributes: dict
+    bounds: Bounds
+
+
+@dataclass
+class MatchResult:
+    """
+    Template matching result of d.image.find().
+    """
+    similarity: float
+    rect: Bounds
+    center: Point
+
+    def __str__(self) -> str:
+        return json.dumps(asdict(self), indent=4)
+
+
 class KeyCode(Enum):
     """
     Openharmony键盘码
